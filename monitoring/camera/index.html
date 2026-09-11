@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Napture 摄像头动作监测</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #10140f; color: #edf3e8; }
+    main { width: min(720px, 92vw); }
+    video { width: 100%; border-radius: 18px; background: #000; transform: scaleX(-1); }
+    .status { margin-top: 12px; padding: 12px 16px; border-radius: 12px; background: #1c2519; }
+    strong { color: #b7d56f; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Napture 动作监测</h1>
+    <p>画面仅在本机处理；系统只上传动作比例，不上传照片或视频。</p>
+    <video id="camera" autoplay muted playsinline></video>
+    <div class="status">设备：<strong id="child"></strong> · 动作比例：<strong id="motion">等待摄像头</strong></div>
+  </main>
+  <canvas id="sample" width="220" height="160" hidden></canvas>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const childId = params.get('child_id') || 'device-default';
+    const video = document.getElementById('camera');
+    const canvas = document.getElementById('sample');
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    const motionLabel = document.getElementById('motion');
+    document.getElementById('child').textContent = childId;
+    let previous = null;
+    let lastSentAt = 0;
+
+    async function sendObservation(motionRatio) {
+      if (Date.now() - lastSentAt < 1000) return;
+      lastSentAt = Date.now();
+      await fetch('/api/device/camera-observation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          child_id: childId,
+          motion_ratio: Number(motionRatio.toFixed(4)),
+          gesture: motionRatio >= 0.07 ? 'movement' : 'still',
+          hands_detected: 0,
+          source: 'continuous_camera_monitor',
+        }),
+      });
+    }
+
+    function sampleFrame(now) {
+      if (video.readyState >= 2) {
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const current = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        if (previous) {
+          let changed = 0;
+          for (let i = 0; i < current.length; i += 4) {
+            const gray = current[i] * 0.299 + current[i + 1] * 0.587 + current[i + 2] * 0.114;
+            const oldGray = previous[i] * 0.299 + previous[i + 1] * 0.587 + previous[i + 2] * 0.114;
+            if (Math.abs(gray - oldGray) > 20) changed += 1;
+          }
+          const ratio = changed / (canvas.width * canvas.height);
+          motionLabel.textContent = `${(ratio * 100).toFixed(1)}%`;
+          sendObservation(ratio).catch(error => { motionLabel.textContent = `上传失败：${error.message}`; });
+        }
+        previous = new Uint8ClampedArray(current);
+      }
+      requestAnimationFrame(sampleFrame);
+    }
+
+    navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+      .then(stream => { video.srcObject = stream; requestAnimationFrame(sampleFrame); })
+      .catch(error => { motionLabel.textContent = `摄像头不可用：${error.message}`; });
+  </script>
+</body>
+</html>

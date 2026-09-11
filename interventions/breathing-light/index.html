@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>呼吸灯粒子效果</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+            color: #c8d8ff;
+            font-family: ui-sans-serif, system-ui, sans-serif;
+        }
+        #video-background {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            filter: grayscale(100%) brightness(0.35) contrast(1.25);
+            transform: scaleX(-1);
+            z-index: 0;
+        }
+        canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            pointer-events: none;
+        }
+        .notice {
+            position: fixed;
+            left: 16px;
+            top: 16px;
+            z-index: 10;
+            padding: 8px 12px;
+            background: rgba(5, 7, 13, 0.75);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 14px;
+            font-size: 13px;
+            line-height: 1.5;
+            pointer-events: none;
+        }
+        #sleep-animation {
+            position: fixed;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            max-width: 42vw;
+            max-height: 50vh;
+            width: auto;
+            height: auto;
+            z-index: 12;
+            pointer-events: none;
+            image-rendering: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="notice">呼吸灯粒子效果 · 屏幕四周边缘 breathing particles</div>
+    <img id="sleep-animation" alt="睡觉动画" />
+    <video id="video-background" autoplay playsinline muted></video>
+    <canvas id="breathingCanvas"></canvas>
+    <script>
+        let canvas = document.getElementById('breathingCanvas');
+        let ctx = null;
+        const video = document.getElementById('video-background');
+
+        const BASE_PARTICLE_COUNT = 400;
+        const EDGE_BAND = 0.12; // 边缘带宽比例
+        const EDGE_GLOW_WIDTH = 0.21; // 屏幕边缘辉光宽度比例
+        const EDGE_GLOW_BASE_ALPHA = 0.18;
+        const EDGE_GLOW_VARIATION = 0.12;
+        const MIN_RADIUS = 2.4;
+        const MAX_RADIUS = 5.2;
+        const particles = [];
+        let width = 0;
+        let height = 0;
+        let nowTime = 0;
+        let currentParticleCount = BASE_PARTICLE_COUNT;
+        let pageClosed = false;
+        let autoCloseTimer = null;
+        const AUTO_CLOSE_MS = 120000;
+
+        // 错误处理函数
+        function handleError(error, message) {
+            console.error(`${message}:`, error);
+            // 可以在这里添加更复杂的错误处理逻辑
+        }
+
+        function randomRange(min, max) {
+            return min + Math.random() * (max - min);
+        }
+
+        function clamp(value, min, max) {
+            return Math.max(min, Math.min(max, value));
+        }
+
+        const ANIMATION_PRIMARY_FOLDER = '/interventions/assets/breathing-light/frames';
+        const ANIMATION_FALLBACK_FOLDER = ANIMATION_PRIMARY_FOLDER;
+        const ANIMATION_PREFIX = 'frame-';
+        const ANIMATION_SUFFIX = '.png';
+        const ANIMATION_START_LOOP = 8;
+        const ANIMATION_FRAME_RATE = 3;
+        const MOTION_CHECK_WIDTH = 220;
+        const MOTION_CHECK_HEIGHT = 160;
+        const MOTION_CHECK_INTERVAL = 140;
+        const MOTION_PIXEL_DIFF_THRESHOLD = 20;
+        const MOTION_RATIO_TRIGGER = 0.038;
+        const MOTION_RATIO_RESET = 0.018;
+        const MOTION_ACTIVE_COUNT = 4;
+        const MOTION_INACTIVE_COUNT = 10;
+        let animationImages = [];
+        let animationIndex = 1;
+        let animationLoopStarted = false;
+        let animationTimer = null;
+        let motionCanvas = document.createElement('canvas');
+        let motionCtx = motionCanvas.getContext('2d');
+        let prevMotionData = null;
+        let motionLevel = 0;
+        let motionDetected = false;
+        let motionActiveFrames = 0;
+        let motionInactiveFrames = 0;
+        let lastMotionCheckTime = 0;
+        const animationImg = document.getElementById('sleep-animation');
+
+        function getAnimationSrc(folder, index) {
+            return `${folder}/${ANIMATION_PREFIX}${index}${ANIMATION_SUFFIX}`;
+        }
+
+        function preloadAnimationFrames(folder, frameCount) {
+            return Promise.all(Array.from({ length: frameCount }, (_, i) => {
+                const img = new Image();
+                const frameNumber = i + 1;
+                const src = getAnimationSrc(folder, frameNumber);
+                return new Promise(resolve => {
+                    img.onload = () => resolve({ index: frameNumber, img, success: true });
+                    img.onerror = () => resolve({ index: frameNumber, img: null, success: false });
+                    img.src = src;
+                });
+            }));
+        }
+
+        async function initSleepAnimation(frameCount = 15) {
+            const folders = [ANIMATION_PRIMARY_FOLDER, ANIMATION_FALLBACK_FOLDER];
+            for (const folder of folders) {
+                const loaded = await preloadAnimationFrames(folder, frameCount);
+                const successFrames = loaded.filter(result => result.success);
+                if (successFrames.length === frameCount) {
+                    animationImages = successFrames.sort((a, b) => a.index - b.index).map(item => item.img);
+                    animationIndex = 1;
+                    animationLoopStarted = false;
+                    animationImg.src = animationImages[0].src;
+                    startSleepAnimation();
+                    return;
+                }
+            }
+            console.warn('睡觉动画加载失败，请检查文件夹或图片命名。');
+        }
+
+        function detectMotion() {
+            if (!video || video.readyState < 2 || animationImages.length === 0) {
+                return;
+            }
+            motionCanvas.width = MOTION_CHECK_WIDTH;
+            motionCanvas.height = MOTION_CHECK_HEIGHT;
+            motionCtx.drawImage(video, 0, 0, MOTION_CHECK_WIDTH, MOTION_CHECK_HEIGHT);
+            const frame = motionCtx.getImageData(0, 0, MOTION_CHECK_WIDTH, MOTION_CHECK_HEIGHT);
+            const data = frame.data;
+            if (!prevMotionData) {
+                prevMotionData = new Uint8ClampedArray(data);
+                return;
+            }
+            let changedPixels = 0;
+            const totalPixels = MOTION_CHECK_WIDTH * MOTION_CHECK_HEIGHT;
+            for (let i = 0, len = data.length; i < len; i += 4) {
+                const gray = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+                const prevGray = (prevMotionData[i] * 0.299 + prevMotionData[i + 1] * 0.587 + prevMotionData[i + 2] * 0.114);
+                if (Math.abs(gray - prevGray) > MOTION_PIXEL_DIFF_THRESHOLD) {
+                    changedPixels += 1;
+                }
+            }
+            prevMotionData.set(data);
+            const motionRatio = changedPixels / totalPixels;
+            motionLevel += (motionRatio - motionLevel) * 0.18;
+            const moving = motionLevel >= MOTION_RATIO_TRIGGER;
+            reportCameraObservation({
+                motion_ratio: Number(motionLevel.toFixed(4)),
+                gesture: moving ? 'movement' : 'still',
+                hands_detected: 0,
+                source: 'breathing_light_camera'
+            });
+            if (moving) {
+                motionActiveFrames += 1;
+                motionInactiveFrames = 0;
+            } else {
+                motionInactiveFrames += 1;
+                motionActiveFrames = 0;
+            }
+
+            if (motionActiveFrames >= MOTION_ACTIVE_COUNT && !motionDetected) {
+                motionDetected = true;
+                resetAnimationToStart();
+            }
+            if (motionInactiveFrames >= MOTION_INACTIVE_COUNT) {
+                motionDetected = false;
+            }
+        }
+
+        function resetAnimationToStart() {
+            if (animationImages.length === 0) {
+                return;
+            }
+            animationIndex = 1;
+            animationLoopStarted = false;
+            animationImg.src = animationImages[0].src;
+        }
+
+        function startSleepAnimation() {
+            if (animationTimer) {
+                clearInterval(animationTimer);
+            }
+            animationTimer = setInterval(() => {
+                advanceSleepAnimation();
+            }, 1000 / ANIMATION_FRAME_RATE);
+        }
+
+        function advanceSleepAnimation() {
+            if (!animationLoopStarted) {
+                if (animationIndex < animationImages.length) {
+                    animationIndex += 1;
+                } else {
+                    animationLoopStarted = true;
+                    animationIndex = ANIMATION_START_LOOP;
+                }
+            } else {
+                if (animationIndex < animationImages.length) {
+                    animationIndex += 1;
+                } else {
+                    animationIndex = ANIMATION_START_LOOP;
+                }
+            }
+            animationImg.src = animationImages[animationIndex - 1].src;
+        }
+
+        function stopSleepAnimation() {
+            if (animationTimer) {
+                clearInterval(animationTimer);
+                animationTimer = null;
+            }
+        }
+
+        async function initSleepAnimationOnce() {
+            await initSleepAnimation(15);
+        }
+
+        const interventionParams = new URLSearchParams(location.search);
+        const interventionPlanId = interventionParams.get('plan_id');
+        const interventionChildId = interventionParams.get('child_id');
+        const CONTROL_API = location.protocol === 'file:' ? 'http://127.0.0.1:5000' : location.origin;
+        let stopPollTimer = null;
+        let lastCameraObservationAt = 0;
+
+        function reportCameraObservation(observation) {
+            if (!interventionChildId || Date.now() - lastCameraObservationAt < 1000) return;
+            lastCameraObservationAt = Date.now();
+            fetch(`${CONTROL_API}/api/device/camera-observation`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ child_id: interventionChildId, ...observation }),
+            }).catch(error => console.warn('摄像头观察回传失败', error));
+        }
+
+        function reportIntervention(status, message = '') {
+            if (!interventionPlanId) return;
+            const query = new URLSearchParams({ status, source: 'breathing_light_page', message });
+            notifyServer(`${CONTROL_API}/api/device/interventions/${encodeURIComponent(interventionPlanId)}/feedback?${query}`);
+        }
+
+        async function checkStopSignal() {
+            if (!interventionPlanId || pageClosed) return;
+            try {
+                const response = await fetch(`${CONTROL_API}/api/device/interventions/${encodeURIComponent(interventionPlanId)}/control`, { cache: 'no-store' });
+                if (!response.ok) return;
+                const control = await response.json();
+                if (control.stop_requested || ['stopped', 'cancelled', 'failed'].includes(control.execution_status)) {
+                    closePage('stopped', '教师端请求关闭呼吸灯页面');
+                }
+            } catch (error) {
+                console.warn('无法读取呼吸灯关闭信号', error);
+            }
+        }
+
+        setInterval(async () => {
+            try {
+                const response = await fetch(`${CONTROL_API}/api/runtime/status`, { cache: 'no-store' });
+                if (!response.ok) return;
+                const status = await response.json();
+                if (status.active === false) closePage('stopped', '教师运行时已停止');
+            } catch (error) {
+                console.warn('无法读取教师页面状态', error);
+            }
+        }, 3000);
+        stopPollTimer = setInterval(checkStopSignal, 1500);
+        checkStopSignal();
+
+        function notifyServer(url) {
+            try {
+                fetch(url, { mode: 'no-cors' }).catch(() => {});
+            } catch (e) {
+                console.warn('notifyServer failed', e);
+            }
+            const beacon = new Image();
+            beacon.src = `${url}${url.includes('?') ? '&' : '?'}_=${Date.now()}`;
+        }
+
+        function closePage(reason = 'completed', message = '呼吸灯页面按计划结束') {
+            if (pageClosed) return;
+            pageClosed = true;
+            if (autoCloseTimer) {
+                clearTimeout(autoCloseTimer);
+                autoCloseTimer = null;
+            }
+            if (stopPollTimer) {
+                clearInterval(stopPollTimer);
+                stopPollTimer = null;
+            }
+            reportIntervention(reason, message);
+            stopSleepAnimation();
+            if (video.srcObject) video.srcObject.getTracks().forEach(track => track.stop());
+            video.srcObject = null;
+            video.src = '';
+            document.body.innerHTML = `
+                <div style="position:fixed; top:0; left:0; width:100%; height:100%; background:#000; color:#fff; display:flex; align-items:center; justify-content:center; flex-direction:column; font-family:monospace; z-index:99999;">
+                    <h1>🌙 呼吸灯已关闭</h1>
+                    <p>页面将在几秒内退出。</p>
+                </div>
+            `;
+            setTimeout(() => {
+                try { window.close(); } catch (e) { }
+            }, reason === 'stopped' ? 250 : 2000);
+        }
+
+        function scheduleAutoClose() {
+            if (autoCloseTimer) {
+                clearTimeout(autoCloseTimer);
+            }
+            autoCloseTimer = setTimeout(closePage, AUTO_CLOSE_MS);
+        }
+
+        window.addEventListener('beforeunload', () => {
+            if (!pageClosed) {
+                reportIntervention('completed', '呼吸灯页面已关闭');
+            }
+        });
+
+        async function startStream(deviceId = null) {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } } });
+            video.srcObject = stream;
+            await new Promise((resolve) => {
+                video.onloadedmetadata = () => {
+                    video.play().then(resolve).catch(err => {
+                        console.warn('自动播放失败:', err);
+                        resolve();
+                    });
+                };
+            });
+        }
+
+        async function startCameraStream() {
+            try {
+                await startStream();
+                reportIntervention('started', '摄像头与呼吸灯页面已启动');
+            } catch (error) {
+                handleError(error, 'Camera access denied or unavailable');
+                reportIntervention('failed', '摄像头不可用');
+                video.style.display = 'none';
+                document.body.style.background = '#12131b';
+            }
+        }
+
+        class Particle {
+            constructor(index) {
+                this.edge = index % 4; // 0: top, 1: right, 2: bottom, 3: left
+                // 生成更密集的边缘分布
+                this.relative = Math.pow(Math.random(), 1.5); // 使粒子更集中在边缘
+                this.radius = randomRange(MIN_RADIUS, MAX_RADIUS);
+                this.phase = Math.random() * Math.PI * 2;
+                this.speed = randomRange(0.45, 1.0);
+                this.offsetStrength = randomRange(27, 63);
+                this.alphaBase = randomRange(0.34, 0.62);
+                this.alphaRange = randomRange(0.32, 0.56);
+                this.baseHue = randomRange(195, 230); // 高级冷色调
+                this.colorHue = this.baseHue + randomRange(-12, 12);
+                this.accentHue = (this.baseHue + randomRange(18, 36)) % 360;
+                this.tilt = randomRange(0.2, 1.2);
+                this.updateBase();
+            }
+
+            updateBase() {
+                // 调整 edgeOffset 函数，使粒子更靠近边缘
+                const edgeOffset = () => 0.005 + Math.pow(Math.random(), 4) * EDGE_BAND;
+                if (this.edge === 0) {
+                    this.baseX = width * this.relative;
+                    this.baseY = height * edgeOffset();
+                } else if (this.edge === 1) {
+                    this.baseX = width * (1 - edgeOffset());
+                    this.baseY = height * this.relative;
+                } else if (this.edge === 2) {
+                    this.baseX = width * this.relative;
+                    this.baseY = height * (1 - edgeOffset());
+                } else {
+                    this.baseX = width * edgeOffset();
+                    this.baseY = height * this.relative;
+                }
+                this.baseX = clamp(this.baseX, 0, width);
+                this.baseY = clamp(this.baseY, 0, height);
+            }
+
+            resize() {
+                // 保持边缘位置比例，但保持当前 edge 类型
+                this.relative = clamp(this.relative, 0, 1);
+                this.updateBase();
+            }
+
+            update(deltaSeconds, globalPhase) {
+                const moveT = globalPhase * this.speed + this.phase;
+                const breatheT = globalPhase + this.phase * 0.35;
+                const driftX = Math.sin(moveT * 0.72 + this.tilt) * this.offsetStrength * 0.55;
+                const driftY = Math.cos(moveT * 0.81 - this.tilt) * this.offsetStrength * 0.42;
+                const alongEdge = Math.sin(moveT * 0.41 + this.phase) * 5;
+                let x = this.baseX;
+                let y = this.baseY;
+
+                if (this.edge === 0 || this.edge === 2) {
+                    x += driftX * 0.65 + alongEdge;
+                    y += driftY * 0.18;
+                } else {
+                    x += driftX * 0.18;
+                    y += driftY * 0.65 + alongEdge;
+                }
+
+                this.x = clamp(x, 0, width);
+                this.y = clamp(y, 0, height);
+                // 增加呼吸频率和范围
+                this.alpha = clamp(this.alphaBase + Math.sin(breatheT * 1.5) * this.alphaRange * 1.2, 0.05, 0.9);
+                this.glow = this.radius * 2.7 + Math.sin(moveT * 1.4) * 1.8;
+                // 添加颜色随时间动态变化的效果
+                this.hue = (this.colorHue + globalPhase * 9) % 360;
+                this.hue2 = (this.accentHue + Math.sin(this.phase * 0.92) * 8) % 360;
+            }
+
+            draw(ctx) {
+                const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.glow);
+                gradient.addColorStop(0, `hsla(${this.hue}, 92%, 96%, ${this.alpha * 0.82})`);
+                gradient.addColorStop(0.28, `hsla(${this.hue2}, 80%, 78%, ${this.alpha * 0.48})`);
+                gradient.addColorStop(0.56, `hsla(${this.hue2}, 72%, 70%, ${this.alpha * 0.24})`);
+                gradient.addColorStop(0.84, `hsla(${this.hue}, 88%, 62%, ${this.alpha * 0.12})`);
+                gradient.addColorStop(1, 'rgba(6, 12, 20, 0)');
+
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.glow * 1.05, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.fillStyle = `hsla(${this.hue}, 100%, 96%, ${this.alpha})`;
+                ctx.shadowBlur = 12;
+                ctx.shadowColor = `hsla(${this.hue2}, 100%, 90%, ${this.alpha * 0.7})`;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                ctx.shadowColor = 'transparent';
+            }
+        }
+
+        function setupCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = Math.floor(width * dpr);
+            canvas.height = Math.floor(height * dpr);
+            canvas.style.width = width + 'px';
+            canvas.style.height = height + 'px';
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            
+            // 计算自适应粒子数量
+            const baseArea = 1920 * 1080;
+            const currentArea = width * height;
+            const areaRatio = currentArea / baseArea;
+            const newParticleCount = Math.max(150, Math.min(800, Math.round(BASE_PARTICLE_COUNT * areaRatio)));
+            
+            if (newParticleCount !== currentParticleCount) {
+                currentParticleCount = newParticleCount;
+                createParticles();
+            }
+        }
+
+        function createParticles() {
+            particles.length = 0;
+            for (let i = 0; i < currentParticleCount; i++) {
+                particles.push(new Particle(i));
+            }
+        }
+
+        function resizeParticles() {
+            for (const particle of particles) {
+                particle.resize();
+            }
+        }
+
+        function drawEdgeGlow(globalPhase) {
+            const glowPhase = globalPhase * 2.3;
+            const glowAlpha = clamp(
+                EDGE_GLOW_BASE_ALPHA + (Math.sin(glowPhase) * 0.5 + 0.5) * EDGE_GLOW_VARIATION * 5.0,
+                0.06,
+                0.58
+            );
+            const glowWidth = Math.max(100, Math.min(width, height) * EDGE_GLOW_WIDTH);
+            const glowColorA = `hsla(192, 88%, 68%, ${glowAlpha})`;
+            const glowColorB = `hsla(220, 72%, 74%, ${glowAlpha * 0.86})`;
+            const transparent = 'rgba(4, 10, 24, 0)';
+
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+
+            let gradient = ctx.createLinearGradient(0, 0, 0, glowWidth);
+            gradient.addColorStop(0, glowColorA);
+            gradient.addColorStop(1, transparent);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, width, glowWidth);
+
+            gradient = ctx.createLinearGradient(0, height - glowWidth, 0, height);
+            gradient.addColorStop(0, transparent);
+            gradient.addColorStop(1, glowColorB);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, height - glowWidth, width, glowWidth);
+
+            gradient = ctx.createLinearGradient(0, 0, glowWidth, 0);
+            gradient.addColorStop(0, glowColorA);
+            gradient.addColorStop(1, transparent);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, glowWidth, height);
+
+            gradient = ctx.createLinearGradient(width - glowWidth, 0, width, 0);
+            gradient.addColorStop(0, transparent);
+            gradient.addColorStop(1, glowColorB);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(width - glowWidth, 0, glowWidth, height);
+
+            ctx.restore();
+        }
+
+        let lastTimestamp = 0;
+        function animate(timestamp) {
+            try {
+                if (!lastTimestamp) lastTimestamp = timestamp;
+                const delta = (timestamp - lastTimestamp) / 1000;
+                lastTimestamp = timestamp;
+                nowTime += delta;
+                const globalPhase = nowTime * 0.7;
+
+                if (timestamp - lastMotionCheckTime > MOTION_CHECK_INTERVAL) {
+                    detectMotion();
+                    lastMotionCheckTime = timestamp;
+                }
+
+                ctx.clearRect(0, 0, width, height);
+                ctx.clearRect(0, 0, width, height);
+                ctx.fillStyle = 'rgba(4, 8, 18, 0.18)';
+                ctx.fillRect(0, 0, width, height);
+                drawEdgeGlow(globalPhase);
+
+                ctx.globalCompositeOperation = 'lighter';
+                ctx.shadowBlur = 0;
+                for (const particle of particles) {
+                    particle.update(delta, globalPhase);
+                    particle.draw(ctx);
+                }
+                ctx.globalCompositeOperation = 'source-over';
+
+                requestAnimationFrame(animate);
+            } catch (error) {
+                handleError(error, 'Error during animation');
+                // 即使出错也继续请求下一帧，确保动画不会完全停止
+                requestAnimationFrame(animate);
+            }
+        }
+
+        function init() {
+            try {
+                if (!canvas) {
+                    throw new Error('Canvas element not found');
+                }
+                ctx = canvas.getContext('2d');
+                if (!ctx) {
+                    throw new Error('Failed to get canvas context');
+                }
+                setupCanvas();
+                createParticles();
+                startCameraStream();
+                initSleepAnimationOnce();
+                scheduleAutoClose();
+                window.addEventListener('resize', () => {
+                    try {
+                        setupCanvas();
+                        resizeParticles();
+                    } catch (error) {
+                        handleError(error, 'Error during resize');
+                    }
+                });
+                requestAnimationFrame(animate);
+            } catch (error) {
+                handleError(error, 'Error during initialization');
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
