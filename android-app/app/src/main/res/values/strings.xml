@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">午睡家长端</string>
+    <!-- 真机安装时，把这里改成部署后的 HTTPS 地址，或电脑局域网 IP，例如 http://192.168.1.23:5000/parent -->
+    <string name="parent_app_url">http://10.0.2.2:5000/parent</string>
+</resources>
