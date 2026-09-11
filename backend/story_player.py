@@ -10,6 +10,7 @@ from dashscope import Generation
 
 
 dashscope.api_key = os.getenv("DASHSCOPE_API_KEY", "")
+MODEL = os.getenv("DASHSCOPE_MODEL", "qwen-turbo")
 RUN = True
 context = ""
 segment_index = 0
@@ -47,7 +48,7 @@ def generate_text():
         "每次只讲2到4句，不要突然更换人物，不要说教。已讲内容：\n" + context
     )
     try:
-        response = Generation.call(model="qwen-turbo", prompt=prompt)
+        response = Generation.call(model=MODEL, prompt=prompt)
         text = response.output.text.strip()
         if not text:
             return fallback_text()

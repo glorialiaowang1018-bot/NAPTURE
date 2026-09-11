@@ -194,6 +194,12 @@
             const motionRatio = changedPixels / totalPixels;
             motionLevel += (motionRatio - motionLevel) * 0.18;
             const moving = motionLevel >= MOTION_RATIO_TRIGGER;
+            reportCameraObservation({
+                motion_ratio: Number(motionLevel.toFixed(4)),
+                gesture: moving ? 'movement' : 'still',
+                hands_detected: 0,
+                source: 'breathing_light_camera'
+            });
             if (moving) {
                 motionActiveFrames += 1;
                 motionInactiveFrames = 0;
@@ -260,8 +266,20 @@
 
         const interventionParams = new URLSearchParams(location.search);
         const interventionPlanId = interventionParams.get('plan_id');
+        const interventionChildId = interventionParams.get('child_id');
         const CONTROL_API = location.protocol === 'file:' ? 'http://127.0.0.1:5000' : location.origin;
         let stopPollTimer = null;
+        let lastCameraObservationAt = 0;
+
+        function reportCameraObservation(observation) {
+            if (!interventionChildId || Date.now() - lastCameraObservationAt < 1000) return;
+            lastCameraObservationAt = Date.now();
+            fetch(`${CONTROL_API}/api/device/camera-observation`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ child_id: interventionChildId, ...observation }),
+            }).catch(error => console.warn('摄像头观察回传失败', error));
+        }
 
         function reportIntervention(status, message = '') {
             if (!interventionPlanId) return;

@@ -234,8 +234,20 @@
 
         const interventionParams = new URLSearchParams(location.search);
         const interventionPlanId = interventionParams.get('plan_id');
+        const interventionChildId = interventionParams.get('child_id');
         const CONTROL_API = location.protocol === 'file:' ? 'http://127.0.0.1:5000' : location.origin;
         let stopPollTimer = null;
+        let lastCameraObservationAt = 0;
+
+        function reportCameraObservation(observation) {
+            if (!interventionChildId || Date.now() - lastCameraObservationAt < 1000) return;
+            lastCameraObservationAt = Date.now();
+            fetch(`${CONTROL_API}/api/device/camera-observation`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ child_id: interventionChildId, ...observation }),
+            }).catch(error => console.warn('手势观察回传失败', error));
+        }
 
         function reportIntervention(status, message = '') {
             if (!interventionPlanId) return;
@@ -474,7 +486,9 @@
         function onHandsResults(results) {
             if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
                 if(drawingActive) { drawingActive=false; resetDrawingPath(); }
-                leftHandGesture='none'; rightHandGesture='none'; currentTool='none'; updateModeStatusDisplay(); return;
+                leftHandGesture='none'; rightHandGesture='none'; currentTool='none';
+                reportCameraObservation({ gesture: 'none', hands_detected: 0, source: 'gesture_drawing_camera' });
+                updateModeStatusDisplay(); return;
             }
             let leftHand=null, rightHand=null;
             for(let i=0;i<results.multiHandLandmarks.length;i++) {
@@ -506,6 +520,11 @@
             rightHandGesture = getStableGesture(rightGestureHistory, rightGesture);
             
             let modeGesture = (leftHandGesture==='one'||rightHandGesture==='one')?'one':(leftHandGesture==='two'||rightHandGesture==='two')?'two':'none';
+            reportCameraObservation({
+                gesture: modeGesture,
+                hands_detected: results.multiHandLandmarks.length,
+                source: 'gesture_drawing_camera'
+            });
             updateToolByGesture(modeGesture);
             
             // 控制手逻辑

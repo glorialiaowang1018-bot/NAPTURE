@@ -1,11 +1,12 @@
 # Teacher / Parent Dashboard API
 
-当前后端由 Flask 提供。默认数据来源仍然是设备 `/data` 上报、AI 主循环 `/api/ai/decision` 上报、教师操作和家长反馈。为了未连接 ESP32 时调试页面，额外提供了显式开启的演示模式；演示模式默认关闭，不会影响正常接入流程。
+当前后端由 Flask 提供。设备通过 `/data` 上报传感器数据，浏览器干预模块通过 `/api/device/camera-observation` 上报非图像视觉特征。系统聚合近期趋势，允许 LLM 在安全范围内调整状态分类阈值，再由显式分类器产生状态并进入教师审核与反馈流程。`/api/ai/decision` 仍可接收外部 AI 管线的决策结果。
 
 ## 页面
 
 - `GET /teacher`：教师端 Dashboard。
 - `GET /parent`：家长端手机 Dashboard，按登录账号绑定关系读取报告。
+- `GET /monitor/camera?child_id=<id>`：持续采集本地摄像头动作特征并接入统一状态管线；不上传原始画面。
 
 ## 演示模式
 
@@ -78,7 +79,7 @@
 {
   "child_id": "device-default",
   "name": "可选儿童姓名",
-  "state": "sleeping|sleepy|need_help|calm_awake|alarm",
+  "state": "可选；无数值信号时作为回退状态",
   "hr": 82,
   "br": 22,
   "mic": 0.12,
@@ -86,6 +87,31 @@
   "temperature": 25.5,
   "humidity": 53,
   "brightness": 120
+}
+```
+
+当请求包含传感器数值时，后端会返回显式分类器产生的 `classified_state`，以及本次阈值来自 `llm`、`rules` 或 `rules_fallback`：
+
+```json
+{
+  "status": "ok",
+  "child_id": "device-default",
+  "classified_state": "sleeping",
+  "decision_source": "llm"
+}
+```
+
+### `POST /api/device/camera-observation`
+
+浏览器端摄像头模块上报动作与手势特征。接口不接收、不保存原始照片或视频。
+
+```json
+{
+  "child_id": "device-default",
+  "motion_ratio": 0.042,
+  "gesture": "one",
+  "hands_detected": 1,
+  "source": "gesture_drawing_camera"
 }
 ```
 

@@ -1,4 +1,0 @@
-Flask>=3.0,<4
-Werkzeug>=3.0,<4
-pygame>=2.5
-dashscope>=1.20

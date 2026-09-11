@@ -15,12 +15,28 @@ import uuid
 import webbrowser
 from pathlib import Path
 
+import dashscope
+from dashscope import Generation
 from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
 app = Flask(__name__)
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+
+def load_local_env(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+load_local_env(Path(__file__).resolve().parent.parent / ".env")
 
 
 def react_frontend_or_none():
@@ -43,6 +59,8 @@ last_page_event = {"page": None, "event": None, "time": None, "id": 0}
 
 children: dict[str, dict] = {}
 sensor_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=MAX_HISTORY))
+camera_observations: dict[str, deque] = defaultdict(lambda: deque(maxlen=120))
+decision_profile_cache: dict[str, dict] = {}
 sleep_records: dict[str, list] = defaultdict(list)
 interactions: dict[str, deque] = defaultdict(lambda: deque(maxlen=MAX_HISTORY))
 parent_feedback: dict[str, list] = defaultdict(list)
@@ -58,6 +76,11 @@ users: dict[str, dict] = {}
 sessions: dict[str, str] = {}
 published_reports: dict[str, list] = defaultdict(list)
 child_positions: dict[str, int] = {}
+
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "").strip()
+DASHSCOPE_MODEL = os.getenv("DASHSCOPE_MODEL", "qwen-turbo").strip() or "qwen-turbo"
+LLM_DECISION_INTERVAL_SECONDS = max(30, int(os.getenv("LLM_DECISION_INTERVAL_SECONDS", "120")))
+dashscope.api_key = DASHSCOPE_API_KEY
 
 STATE_FILE = Path(__file__).with_name("nap_app_state.json")
 
@@ -285,6 +308,193 @@ def parse_environment(data: dict) -> dict:
         "brightness": data.get("brightness") or data.get("light"),
         "heart_rate": data.get("hr"),
         "breath_rate": data.get("br"),
+    }
+
+
+BASE_DECISION_THRESHOLDS = {
+    "sleep_motion_max": 45.0,
+    "sleep_heart_rate_max": 90.0,
+    "sleep_breath_rate_max": 22.0,
+    "help_motion_min": 160.0,
+    "help_heart_rate_min": 100.0,
+    "help_breath_rate_min": 27.0,
+    "help_noise_min": 70.0,
+    "alarm_motion_min": 360.0,
+    "alarm_heart_rate_min": 118.0,
+    "alarm_breath_rate_min": 34.0,
+    "alarm_noise_min": 85.0,
+    "camera_help_ratio": 0.07,
+    "camera_alarm_ratio": 0.16,
+}
+
+
+def number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def first_present(data: dict, *keys: str):
+    for key in keys:
+        if data.get(key) is not None:
+            return data[key]
+    return None
+
+
+def normalized_noise(value) -> float | None:
+    parsed = number(value)
+    if parsed is None:
+        return None
+    return parsed * 100 if 0 <= parsed <= 1 else parsed
+
+
+def average(values: list) -> float | None:
+    numeric = [number(value) for value in values]
+    numeric = [value for value in numeric if value is not None]
+    return round(sum(numeric) / len(numeric), 3) if numeric else None
+
+
+def sensor_trend_summary(child_id: str, incoming: dict | None = None) -> dict:
+    incoming = incoming or {}
+    recent = list(sensor_history[child_id])[:30]
+
+    def series(*keys: str) -> list:
+        values = []
+        for item in [incoming, *recent]:
+            for key in keys:
+                if item.get(key) is not None:
+                    values.append(item[key])
+                    break
+            environment = item.get("environment") or {}
+            if not any(item.get(key) is not None for key in keys):
+                for key in keys:
+                    if environment.get(key) is not None:
+                        values.append(environment[key])
+                        break
+        return values
+
+    camera = list(camera_observations[child_id])[:20]
+    return {
+        "sample_count": len(recent) + (1 if incoming else 0),
+        "heart_rate_avg": average(series("hr", "heart_rate")),
+        "breath_rate_avg": average(series("br", "breath_rate")),
+        "motion_avg": average(series("motion", "motion_frequency")),
+        "noise_avg": average([normalized_noise(value) for value in series("mic", "noise")]),
+        "temperature_avg": average(series("temperature", "temp", "to")),
+        "camera_motion_avg": average([item.get("motion_ratio") for item in camera]),
+        "recent_gestures": [item.get("gesture") for item in camera if item.get("gesture") not in (None, "", "none")][:5],
+    }
+
+
+def parse_llm_json(text: str) -> dict:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("LLM response does not contain a JSON object")
+    value = json.loads(cleaned[start:end + 1])
+    if not isinstance(value, dict):
+        raise ValueError("LLM response is not a JSON object")
+    return value
+
+
+def call_llm_json(prompt: str) -> dict:
+    if not DASHSCOPE_API_KEY:
+        raise RuntimeError("DASHSCOPE_API_KEY is not configured")
+    response = Generation.call(model=DASHSCOPE_MODEL, prompt=prompt)
+    text = getattr(getattr(response, "output", None), "text", "")
+    return parse_llm_json(text)
+
+
+def llm_adjusted_thresholds(child_id: str, trend: dict) -> tuple[dict, dict]:
+    cached = decision_profile_cache.get(child_id)
+    if cached and now_ts() < cached["expires_at"]:
+        return cached["thresholds"], cached["metadata"]
+
+    thresholds = dict(BASE_DECISION_THRESHOLDS)
+    metadata = {"source": "rules", "model": None, "trend": trend}
+    if DASHSCOPE_API_KEY and trend.get("sample_count", 0) >= 3:
+        prompt = f"""
+You assist a kindergarten nap-monitoring prototype. Review the aggregated, non-identifying sensor trend below.
+Return JSON only with: {{"multipliers": {{threshold_name: number}}, "reason": "short explanation"}}.
+You may adjust only these thresholds by a multiplier between 0.85 and 1.15:
+{json.dumps(BASE_DECISION_THRESHOLDS, ensure_ascii=False)}
+Trend:
+{json.dumps(trend, ensure_ascii=False)}
+Do not diagnose illness. Prefer conservative changes and leave uncertain thresholds at 1.0.
+""".strip()
+        try:
+            result = call_llm_json(prompt)
+            multipliers = result.get("multipliers") or {}
+            for key, base_value in BASE_DECISION_THRESHOLDS.items():
+                multiplier = number(multipliers.get(key))
+                if multiplier is not None:
+                    thresholds[key] = round(base_value * min(1.15, max(0.85, multiplier)), 3)
+            metadata = {
+                "source": "llm",
+                "model": DASHSCOPE_MODEL,
+                "reason": str(result.get("reason") or "")[:240],
+                "trend": trend,
+            }
+        except Exception as exc:
+            metadata = {"source": "rules_fallback", "model": DASHSCOPE_MODEL, "error": type(exc).__name__, "trend": trend}
+
+    decision_profile_cache[child_id] = {
+        "thresholds": thresholds,
+        "metadata": metadata,
+        "expires_at": now_ts() + LLM_DECISION_INTERVAL_SECONDS,
+    }
+    return thresholds, metadata
+
+
+def classify_sensor_state(child_id: str, payload: dict) -> tuple[str, dict]:
+    trend = sensor_trend_summary(child_id, payload)
+    thresholds, llm_metadata = llm_adjusted_thresholds(child_id, trend)
+    heart_rate = number(first_present(payload, "hr", "heart_rate"))
+    breath_rate = number(first_present(payload, "br", "breath_rate"))
+    motion = number(first_present(payload, "motion", "motion_frequency"))
+    noise = normalized_noise(first_present(payload, "mic", "noise"))
+    camera_motion = trend.get("camera_motion_avg")
+
+    measurements = [heart_rate, breath_rate, motion, noise, camera_motion]
+    explicit_state = payload.get("state") or payload.get("status")
+    if all(value is None for value in measurements):
+        state = explicit_state or "unknown"
+    elif (
+        (heart_rate is not None and heart_rate >= thresholds["alarm_heart_rate_min"])
+        or (breath_rate is not None and breath_rate >= thresholds["alarm_breath_rate_min"])
+        or (motion is not None and motion >= thresholds["alarm_motion_min"])
+        or (noise is not None and noise >= thresholds["alarm_noise_min"])
+        or (camera_motion is not None and camera_motion >= thresholds["camera_alarm_ratio"])
+    ):
+        state = "alarm"
+    elif (
+        (heart_rate is not None and heart_rate >= thresholds["help_heart_rate_min"])
+        or (breath_rate is not None and breath_rate >= thresholds["help_breath_rate_min"])
+        or (motion is not None and motion >= thresholds["help_motion_min"])
+        or (noise is not None and noise >= thresholds["help_noise_min"])
+        or (camera_motion is not None and camera_motion >= thresholds["camera_help_ratio"])
+    ):
+        state = "need_help"
+    elif (
+        motion is not None
+        and motion <= thresholds["sleep_motion_max"]
+        and (heart_rate is None or heart_rate <= thresholds["sleep_heart_rate_max"])
+        and (breath_rate is None or breath_rate <= thresholds["sleep_breath_rate_max"])
+    ):
+        state = "sleeping"
+    elif motion is not None and motion < thresholds["help_motion_min"]:
+        state = "sleepy"
+    else:
+        state = explicit_state or "calm_awake"
+
+    return state, {
+        **llm_metadata,
+        "thresholds": thresholds,
+        "classifier": "explicit-threshold-v1",
+        "classified_state": state,
     }
 
 
@@ -633,7 +843,7 @@ def resolve_demo_intervention_later(plan_id: str) -> None:
         record_execution_feedback(plan_id, "completed", {"source": "demo_simulator", "simulated": True})
 
 
-def create_demo_intervention(child_id: str, state: str) -> dict | None:
+def create_demo_intervention(child_id: str, state: str, decision_metadata: dict | None = None) -> dict | None:
     action = demo_action_for_state(state)
     if action["type"] == "none":
         return None
@@ -654,7 +864,7 @@ def create_demo_intervention(child_id: str, state: str) -> dict | None:
         "state": state,
         "proposed_action": action,
         "final_action": None,
-        "llm_result": {"source": "demo"},
+        "llm_result": decision_metadata or {"source": "rules"},
         "status": "pending",
         "created_at": iso(ts),
         "deadline_ts": ts + 5,
@@ -672,7 +882,12 @@ def create_demo_intervention(child_id: str, state: str) -> dict | None:
     return plan
 
 
-def maybe_create_ai_intervention(child_id: str, state: str, source: str = "state_monitor") -> dict | None:
+def maybe_create_ai_intervention(
+    child_id: str,
+    state: str,
+    source: str = "state_monitor",
+    decision_metadata: dict | None = None,
+) -> dict | None:
     if state not in ("sleepy", "need_help", "alarm"):
         return None
     key = (child_id, state)
@@ -680,10 +895,14 @@ def maybe_create_ai_intervention(child_id: str, state: str, source: str = "state
     last_ts = last_auto_intervention_at.get(key, 0)
     if ts - last_ts < 120:
         return None
-    plan = create_demo_intervention(child_id, state)
+    plan = create_demo_intervention(child_id, state, decision_metadata)
     if plan:
         plan["origin"] = source
-        plan["llm_result"] = {"source": source, "trigger_state": state}
+        plan["llm_result"] = {
+            **(decision_metadata or {}),
+            "pipeline_source": source,
+            "trigger_state": state,
+        }
         last_auto_intervention_at[key] = ts
     return plan
 
@@ -2015,6 +2234,14 @@ def breathing_light_intervention():
   )
 
 
+@app.route("/monitor/camera")
+def camera_monitor_page():
+  return send_from_directory(
+      Path(__file__).resolve().parent / "monitoring" / "camera",
+      "index.html",
+  )
+
+
 @app.route("/interventions/gesture-drawing")
 def gesture_drawing_intervention():
   return send_from_directory(
@@ -2267,7 +2494,7 @@ def data():
         last_time = ts
         child = ensure_child(child_id, normalized)
         old_state = child.get("state", "unknown")
-        state = normalized.get("state") or normalized.get("status") or old_state
+        state, decision_metadata = classify_sensor_state(child_id, normalized)
         child.update(
             {
                 "state": state,
@@ -2287,18 +2514,25 @@ def data():
             "mic": normalized.get("mic"),
             "motion": normalized.get("motion") or normalized.get("motion_frequency"),
             "environment": child["environment"],
+            "decision": decision_metadata,
         }
         sensor_history[child_id].appendleft(sample)
         add_interaction(child_id, "sensor_update", sample)
         publish("child_state_updated", build_child_summary(child_id))
-        maybe_create_ai_intervention(child_id, state, "sensor_state_monitor")
+        maybe_create_ai_intervention(child_id, state, "sensor_state_monitor", decision_metadata)
     print("\n======================")
     print("收到ESP32原始请求体:")
     print(raw_body)
     print("标准化数据:")
     print(normalized)
     print("======================\n")
-    return {"status": "ok", "msg": "received", "child_id": child_id}, 200
+    return {
+        "status": "ok",
+        "msg": "received",
+        "child_id": child_id,
+        "classified_state": state,
+        "decision_source": decision_metadata.get("source"),
+    }, 200
 
 
 @app.route("/data", methods=["GET"])
@@ -2307,6 +2541,44 @@ def data_get():
         if last_data is None:
             return {"status": "no data yet"}, 404
         return last_data, 200
+
+
+@app.route("/api/device/camera-observation", methods=["POST"])
+def camera_observation():
+    payload = normalize_payload(request.json)
+    child_id = child_id_from(payload)
+    observation = {
+        "time": iso(now_ts()),
+        "child_id": child_id,
+        "motion_ratio": number(payload.get("motion_ratio")),
+        "gesture": str(payload.get("gesture") or "none")[:40],
+        "hands_detected": int(number(payload.get("hands_detected")) or 0),
+        "source": str(payload.get("source") or "browser_camera")[:60],
+    }
+    with lock:
+        camera_observations[child_id].appendleft(observation)
+        add_interaction(child_id, "camera_observation", observation)
+        latest_sensor = dict(sensor_history[child_id][0]) if sensor_history[child_id] else {}
+        latest_sensor["state"] = ensure_child(child_id).get("state", "unknown")
+        state, decision_metadata = classify_sensor_state(child_id, latest_sensor)
+        child = ensure_child(child_id)
+        old_state = child.get("state", "unknown")
+        child["state"] = state
+        child["last_seen"] = observation["time"]
+        update_sleep_transition(child_id, old_state, state, now_ts())
+        add_interaction(child_id, "multimodal_state", {"state": state, "decision": decision_metadata})
+        publish("camera_observation", {"child_id": child_id, "observation": observation, "decision": decision_metadata})
+        publish("child_state_updated", build_child_summary(child_id))
+        maybe_create_ai_intervention(child_id, state, "multimodal_state_monitor", decision_metadata)
+    return jsonify(
+        {
+            "status": "ok",
+            "child_id": child_id,
+            "classified_state": state,
+            "decision_source": decision_metadata.get("source"),
+            "trend": decision_metadata.get("trend"),
+        }
+    )
 
 
 @app.route("/api/ai/decision", methods=["POST"])
@@ -2466,7 +2738,65 @@ def parent_suggestion_for(child_id: str) -> dict:
         title = "作息较稳定，继续保持"
         body = "今天午睡表现平稳，晚间按平时节奏入睡即可，继续保持固定的睡前仪式。"
         level = "good"
-    return {"title": title, "body": body, "level": level, "avg_duration_seconds": int(avg) if avg is not None else None}
+    return {
+        "title": title,
+        "body": body,
+        "level": level,
+        "avg_duration_seconds": int(avg) if avg is not None else None,
+        "source": "rules",
+    }
+
+
+def ai_parent_suggestion_for(child_id: str) -> dict:
+    fallback = parent_suggestion_for(child_id)
+    records = sleep_records[child_id][-14:]
+    if not DASHSCOPE_API_KEY or not records:
+        return fallback
+
+    child = ensure_child(child_id)
+    context = {
+        "recent_sleep_records": [
+            {
+                "duration_seconds": item.get("duration_seconds"),
+                "quality": item.get("quality"),
+                "sleep_start": item.get("sleep_start"),
+                "wake_time": item.get("wake_time"),
+            }
+            for item in records
+        ],
+        "current_environment": child.get("environment") or {},
+        "recent_parent_feedback": [
+            {
+                "body_condition": item.get("body_condition"),
+                "last_night_sleep": item.get("last_night_sleep"),
+            }
+            for item in parent_feedback[child_id][-3:]
+        ],
+    }
+    prompt = f"""
+You generate a cautious, practical evening routine suggestion for the parent of a kindergarten child.
+Use only the non-identifying nap summary below. Do not diagnose illness or make medical claims.
+Return JSON only: {{"title": "Chinese title under 24 characters", "body": "Chinese advice in 1-2 sentences", "level": "good|watch|attention"}}.
+Context:
+{json.dumps(context, ensure_ascii=False)}
+""".strip()
+    try:
+        result = call_llm_json(prompt)
+        title = str(result.get("title") or "").strip()
+        body = str(result.get("body") or "").strip()
+        level = result.get("level") if result.get("level") in ("good", "watch", "attention") else fallback["level"]
+        if not title or not body:
+            return fallback
+        return {
+            "title": title[:48],
+            "body": body[:300],
+            "level": level,
+            "avg_duration_seconds": fallback.get("avg_duration_seconds"),
+            "source": "llm",
+            "model": DASHSCOPE_MODEL,
+        }
+    except Exception as exc:
+        return {**fallback, "source": "rules_fallback", "llm_error": type(exc).__name__}
 
 
 def build_parent_report_snapshot(child_id: str, publisher: dict) -> dict:
@@ -2503,7 +2833,7 @@ def build_parent_report_snapshot(child_id: str, publisher: dict) -> dict:
         "emotion": child.get("emotion"),
         "environment": child.get("environment") or {},
         "teacher_summary": summary,
-        "suggestion": parent_suggestion_for(child_id),
+        "suggestion": ai_parent_suggestion_for(child_id),
         "interventions": visible_intervention_events(child_id),
     }
 
