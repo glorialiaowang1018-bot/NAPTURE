@@ -1,0 +1,110 @@
+﻿# Napture 幼儿午睡智能管理系统
+
+一个面向幼儿园午睡场景的教师端、家长端和本地执行端系统。项目将传感器数据、班级实时状态、AI 干预确认、睡眠报告和家长反馈整合到同一套流程中。
+
+这是一个用于课程设计、作品集和项目申请展示的完整原型系统，重点展示从前端交互到后端调度、实时事件和本地多媒体执行的完整闭环。
+
+## 项目能力
+
+- 教师端班级地图、儿童详情、实时状态和传感器信号
+- 家长端今日报告、历史趋势、作息建议和反馈
+- 教师/家长角色登录与儿童绑定
+- Flask REST API 和 SSE 实时事件流
+- AI 干预的教师确认、取消、切换和自动批准流程
+- 白噪音、睡前故事、呼吸灯和互动绘画干预
+- ESP32 或其他设备通过 `/data` 上报实时数据
+- 报告发布、家长读取和 CSV 导出
+- PWA 安装页和 Android WebView 家长端工程
+
+## 技术栈
+
+- 前端：React 19、TypeScript、Vite、Tailwind CSS
+- 后端：Python、Flask、Werkzeug
+- 实时通信：Server-Sent Events
+- 本地执行：Python 音频脚本、浏览器摄像头页面
+- 移动端：Android WebView 工程
+
+## 目录
+
+```text
+frontend/       React 前端源码
+backend/        Flask API、设备接口与本地干预资源
+android-app/    家长端 Android WebView 工程
+```
+
+## 本地运行
+
+### 1. 安装后端依赖
+
+```powershell
+cd backend
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### 2. 构建前端
+
+```powershell
+cd frontend
+npm install
+npm run build
+```
+
+构建结果会生成在前端项目的 `dist/`。Flask 会优先托管该构建结果。
+
+### 3. 启动服务
+
+```powershell
+cd ..\backend
+$env:PORT="5000"
+.venv\Scripts\python.exe server.py
+```
+
+打开：
+
+- 教师端：`http://127.0.0.1:5000/teacher`
+- 家长端：`http://127.0.0.1:5000/parent`
+
+## 演示账号
+
+账号来自本地演示状态，仅用于项目展示，不要用于生产环境：
+
+- 教师：`13800000000` / `123456`
+- 家长：`13900000015` / `123456`
+
+## 干预说明
+
+教师端的手动干预会进入后端执行队列：
+
+- `game`：互动绘画页面
+- `story`：睡前故事音频
+- `light`：呼吸灯页面
+- `white_noise`：白噪音和呼吸灯组合
+
+呼吸灯和互动绘画通过 Flask HTTP 页面托管，页面会轮询计划控制状态，收到停止信号后释放摄像头、停止动画并尝试关闭窗口。
+
+## 设备接入
+
+设备可以向 `POST /data` 上报儿童状态和传感器数据。完整请求字段与接口返回见 [backend/API_SPEC.md](backend/API_SPEC.md)。
+
+未连接 ESP32 时，可以使用后端演示模式生成班级数据，便于展示教师端实时状态和 AI 干预流程。
+
+## 仓库说明
+
+仓库只保留运行与展示所需的源码、文档和资源，不包含：
+
+- `.venv/`、`node_modules/`、`dist/`
+- `nap_app_state.json` 等本地运行数据
+- `.env` 和真实密钥
+- `*.pt` 等大型模型文件
+- 个人手机号、真实儿童姓名和真实报告
+
+当前项目适合上传 GitHub 作为作品证据。GitHub Pages 只能托管静态前端，不能运行 Flask、SSE 和本地设备执行；如需公网演示，需要单独部署后端服务。
+
+## 当前边界
+
+- 本地音频、浏览器摄像头和互动页面需要运行在实际电脑上。
+- 云服务器可以运行账户、报告和实时 API，但不能替代孩子床边电脑的本地音箱与浏览器。
+- 生产环境应替换演示账号、持久化数据库和开发服务器，并配置 HTTPS。
+

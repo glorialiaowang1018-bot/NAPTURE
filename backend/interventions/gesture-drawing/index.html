@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>手势绘画 · 自动休眠保护</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', 'Poppins', 'Inter', system-ui, sans-serif;
+            background: #000;
+        }
+
+        #video-background {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            filter: grayscale(100%) brightness(0.55) contrast(1.25);
+            z-index: 0;
+            transform: scaleX(-1);
+        }
+
+        #drawing-canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            background: transparent;
+            cursor: none;
+        }
+
+        .tutorial {
+            position: fixed;
+            bottom: 24px;
+            left: 24px;
+            max-width: 320px;
+            background: rgba(10, 10, 20, 0.8);
+            backdrop-filter: blur(12px);
+            border-radius: 28px;
+            padding: 18px 22px;
+            color: #f0f0f0;
+            font-size: 13px;
+            font-weight: 500;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 12px 28px rgba(0,0,0,0.4);
+            z-index: 20;
+            pointer-events: none;
+            font-family: monospace;
+        }
+        .tutorial h3 {
+            margin: 0 0 10px 0;
+            font-size: 20px;
+            font-weight: 700;
+            color: #ffffff;
+        }
+        .gesture-icon {
+            display: inline-block;
+            background: rgba(0,0,0,0.6);
+            border-radius: 40px;
+            padding: 3px 14px;
+            font-weight: bold;
+            margin-right: 8px;
+        }
+        .mode-badge {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(10px);
+            padding: 10px 20px;
+            border-radius: 60px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #fff;
+            z-index: 20;
+            border-left: 4px solid #ffffff;
+            pointer-events: none;
+        }
+        .status-sub {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            background: rgba(0,0,0,0.5);
+            backdrop-filter: blur(8px);
+            padding: 6px 14px;
+            border-radius: 30px;
+            font-size: 11px;
+            color: #ddd;
+            z-index: 20;
+            pointer-events: none;
+        }
+        .corner-animation {
+            position: fixed;
+            top: 150px;
+            right: 20px;
+            width: 180px;
+            padding: 10px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 22px;
+            backdrop-filter: blur(16px);
+            z-index: 18;
+            pointer-events: none;
+        }
+        .corner-animation img {
+            width: 100%;
+            border-radius: 16px;
+        }
+        .clear-btn {
+            position: fixed;
+            bottom: 28px;
+            right: 24px;
+            background: rgba(30,30,40,0.85);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255,100,100,0.5);
+            color: #ffffff;
+            padding: 10px 20px;
+            border-radius: 40px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            z-index: 25;
+            font-family: monospace;
+            transition: 0.2s;
+        }
+        .clear-btn:hover {
+            background: rgba(200,60,60,0.8);
+        }
+        .clear-progress {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 22;
+            display: none;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 18px;
+            background: rgba(0,0,0,0.75);
+            border: 1px solid rgba(255,100,100,0.5);
+            border-radius: 36px;
+            backdrop-filter: blur(12px);
+            color: #fff;
+        }
+        .progress-ring {
+            width: 56px;
+            height: 56px;
+        }
+        .progress-ring-circle {
+            transition: stroke-dashoffset 0.1s linear;
+        }
+        .inactivity-timer {
+            position: fixed;
+            bottom: 28px;
+            left: 24px;
+            background: rgba(0,0,0,0.65);
+            backdrop-filter: blur(8px);
+            padding: 6px 14px;
+            border-radius: 40px;
+            font-size: 12px;
+            font-family: monospace;
+            color: #ffd966;
+            z-index: 30;
+            pointer-events: none;
+            border-left: 3px solid #ffaa44;
+        }
+        @media (max-width: 600px) {
+            .tutorial { font-size: 10px; max-width: 260px; padding: 12px 16px; }
+            .mode-badge { font-size: 11px; padding: 6px 14px; top: 12px; right: 12px; }
+            .status-sub { top: 60px; right: 12px; font-size: 9px; }
+            .clear-btn { bottom: 16px; right: 16px; padding: 6px 14px; }
+            .inactivity-timer { bottom: 16px; left: 16px; font-size: 10px; }
+        }
+    </style>
+</head>
+<body>
+    <select id="camera-select" style="position:fixed;top:20px;left:20px;z-index:1000;font-size:16px;padding:4px 12px;border-radius:8px;display:none;"></select>
+    <video id="video-background" autoplay playsinline muted></video>
+    <canvas id="drawing-canvas"></canvas>
+    
+    <div class="tutorial">
+        <h3>🎨 双手协作绘画</h3>
+        <p>✋ <strong>任意一只手</strong> 做出 1/2 模式手势，另一只手用张开/握拳控制起落</p>
+        <p>🖐️ 模式手势：<br>☝️ 手势1 → 划线<br>✌️ 手势2 (并拢) → 橡皮擦</p>
+        <p style="font-size: 10px; opacity:0.7;">✨ 任何手做模式，另一只手张开开始绘制，握拳结束绘制</p>
+    </div>
+    <div class="mode-badge" id="mode-status">⚙️ 模式: 等待手势</div>
+    <div class="status-sub" id="sub-status">✋ 左手: — &nbsp;| ✊ 右手: —</div>
+    <div class="corner-animation">
+        <img id="right-top-animation" src="/interventions/assets/gesture-drawing/feeding-frames/frame-01.png" alt="动画" />
+    </div>
+    <div class="clear-progress" id="clear-progress">
+        <div class="progress-ring">
+            <svg viewBox="0 0 120 120" width="120" height="120">
+                <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="12" />
+                <circle class="progress-ring-circle" cx="60" cy="60" r="52" fill="none" stroke="#ff6d6d" stroke-width="12" stroke-linecap="round" stroke-dasharray="326.7" stroke-dashoffset="326.7" transform="rotate(-90 60 60)" />
+            </svg>
+        </div>
+        <div class="progress-text">握拳两秒后清空画板</div>
+    </div>
+    <button class="clear-btn" id="clear-canvas">🗑️ 清空画板</button>
+    <div class="inactivity-timer" id="inactivity-timer">⏳ 无交互将自动关闭: 60s</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    
+    <script>
+        // ======================= 自动关闭模块 =======================
+        let lastInteractionTime = Date.now();
+        let inactivityInterval = null;
+        let pageClosed = false;
+        const INACTIVITY_LIMIT = 60000;
+        const timerDisplay = document.getElementById('inactivity-timer');
+        
+        function updateTimerDisplay() {
+            if (pageClosed || !timerDisplay) return;
+            const remaining = Math.max(0, INACTIVITY_LIMIT - (Date.now() - lastInteractionTime));
+            const seconds = Math.ceil(remaining / 1000);
+            timerDisplay.innerHTML = `⏳ 无交互自动关闭: ${seconds}s`;
+            timerDisplay.style.color = remaining <= 5000 ? "#ff8888" : "#ffd966";
+        }
+        
+        function resetInactivityTimer() {
+            if (pageClosed) return;
+            lastInteractionTime = Date.now();
+            updateTimerDisplay();
+        }
+
+        const interventionParams = new URLSearchParams(location.search);
+        const interventionPlanId = interventionParams.get('plan_id');
+        const CONTROL_API = location.protocol === 'file:' ? 'http://127.0.0.1:5000' : location.origin;
+        let stopPollTimer = null;
+
+        function reportIntervention(status, message = '') {
+            if (!interventionPlanId) return;
+            const query = new URLSearchParams({ status, source: 'gesture_game_page', message });
+            notifyServer(`${CONTROL_API}/api/device/interventions/${encodeURIComponent(interventionPlanId)}/feedback?${query}`);
+        }
+
+        async function checkStopSignal() {
+            if (!interventionPlanId || pageClosed) return;
+            try {
+                const response = await fetch(`${CONTROL_API}/api/device/interventions/${encodeURIComponent(interventionPlanId)}/control`, { cache: 'no-store' });
+                if (!response.ok) return;
+                const control = await response.json();
+                if (control.stop_requested || ['stopped', 'cancelled', 'failed'].includes(control.execution_status)) {
+                    closePage('stopped', '教师端请求关闭互动绘画页面');
+                }
+            } catch (error) {
+                console.warn('无法读取互动绘画关闭信号', error);
+            }
+        }
+
+        stopPollTimer = setInterval(checkStopSignal, 1500);
+        checkStopSignal();
+
+        setInterval(async () => {
+            try {
+                const response = await fetch(`${CONTROL_API}/api/runtime/status`, { cache: 'no-store' });
+                if (!response.ok) return;
+                const status = await response.json();
+                if (status.active === false) closePage('stopped', '教师运行时已停止');
+            } catch (error) {
+                console.warn('无法读取教师页面状态', error);
+            }
+        }, 3000);
+        
+        function notifyServer(url) {
+            try {
+                fetch(url, { mode: 'no-cors' }).catch(() => {});
+            } catch (e) {
+                console.warn('notifyServer failed', e);
+            }
+            const beacon = new Image();
+            beacon.src = `${url}${url.includes('?') ? '&' : '?'}_=${Date.now()}`;
+        }
+
+        function closePage(reason = 'completed', message = '小游戏会话正常结束') {
+            if (pageClosed) return;
+            pageClosed = true;
+
+            if (stopPollTimer) {
+                clearInterval(stopPollTimer);
+                stopPollTimer = null;
+            }
+            reportIntervention(reason, message);
+            
+            if (inactivityInterval) clearInterval(inactivityInterval);
+            frameLoopActive = false;
+            if (handsInstance) handsInstance.close().catch(() => {});
+            if (video) {
+                if (video.srcObject) video.srcObject.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+                video.src = '';
+            }
+            // 尝试关闭窗口，若失败则覆盖页面内容
+            if (!window.close()) {
+                document.body.innerHTML = `<div style="position:fixed; top:0; left:0; width:100%; height:100%; background:#000; color:#fff; display:flex; align-items:center; justify-content:center; flex-direction:column; font-family:monospace; z-index:99999;">
+                    <h1>🌙 页面已自动关闭</h1>
+                    <p>${reason === 'stopped' ? '教师端已请求结束本次绘画会话。' : '由于超过1分钟无任何交互，绘画会话已结束。'}</p>
+                    <button onclick="location.reload()" style="margin-top:20px; padding:8px 24px; border-radius:40px;">重新加载</button>
+                </div>`;
+            }
+        }
+
+        window.addEventListener('beforeunload', () => {
+            if (!pageClosed) {
+                reportIntervention('completed', '小游戏页面已关闭');
+            }
+        });
+        
+        function startInactivityMonitor() {
+            inactivityInterval = setInterval(() => {
+                if (!pageClosed && (Date.now() - lastInteractionTime >= INACTIVITY_LIMIT)) closePage();
+                else updateTimerDisplay();
+            }, 1000);
+            resetInactivityTimer();
+            // 监听全局交互
+            ['mousemove', 'click', 'touchstart', 'keydown', 'wheel'].forEach(ev => window.addEventListener(ev, resetInactivityTimer));
+            document.getElementById('clear-canvas')?.addEventListener('click', resetInactivityTimer);
+        }
+        
+        // ======================= 原始完整绘画逻辑 =======================
+        const video = document.getElementById('video-background');
+        const canvas = document.getElementById('drawing-canvas');
+        const ctx = canvas.getContext('2d');
+        const modeStatusDiv = document.getElementById('mode-status');
+        const subStatusDiv = document.getElementById('sub-status');
+        const clearBtn = document.getElementById('clear-canvas');
+        const rightTopAnimation = document.getElementById('right-top-animation');
+        
+        // 动画资源
+        const ZOU_FRAME_COUNT = 10, CHI_FRAME_COUNT = 13;
+        const zouFrames = [], chiFrames = [];
+        let zouCurrentFrame = 1, chiCurrentFrame = 1;
+        let animationNextFrameTime = performance.now();
+        let drawingPreviouslyActive = false;
+        let feedPhase = null, feedSnapshot = null, feedTransitionStart = 0;
+        const FEED_ANIMATION_DURATION = 900;
+        const zhanImage = new Image();
+        zhanImage.src = '/interventions/assets/gesture-drawing/idle.png';
+        
+        for (let i = 1; i <= ZOU_FRAME_COUNT; i++) { let img = new Image(); img.src = `/interventions/assets/gesture-drawing/walking-frames/frame-${String(i).padStart(2, '0')}.png`; zouFrames.push(img); }
+        for (let i = 1; i <= CHI_FRAME_COUNT; i++) { let img = new Image(); img.src = `/interventions/assets/gesture-drawing/feeding-frames/frame-${String(i).padStart(2, '0')}.png`; chiFrames.push(img); }
+        
+        function updateRightTopAnimation(timestamp) {
+            if (!rightTopAnimation) return;
+            if (timestamp < animationNextFrameTime) { requestAnimationFrame(updateRightTopAnimation); return; }
+            if (feedPhase === 'chi') {
+                rightTopAnimation.src = chiFrames[chiCurrentFrame-1]?.src || rightTopAnimation.src;
+                chiCurrentFrame++;
+                if (chiCurrentFrame > CHI_FRAME_COUNT) { feedPhase = null; chiCurrentFrame = 1; updateModeStatusDisplay(); updateClearProgress(0); rightTopAnimation.src = zhanImage.src; }
+                animationNextFrameTime = timestamp + 1000/5;
+            } else if (drawingActive) {
+                if (!drawingPreviouslyActive) zouCurrentFrame = 1;
+                drawingPreviouslyActive = true;
+                rightTopAnimation.src = zouFrames[zouCurrentFrame-1]?.src || rightTopAnimation.src;
+                zouCurrentFrame = (zouCurrentFrame % ZOU_FRAME_COUNT) + 1;
+                animationNextFrameTime = timestamp + 1000/5;
+            } else {
+                drawingPreviouslyActive = false;
+                rightTopAnimation.src = zhanImage.src;
+                animationNextFrameTime = timestamp + 1000;
+            }
+            requestAnimationFrame(updateRightTopAnimation);
+        }
+        requestAnimationFrame(updateRightTopAnimation);
+        
+        // 绘画状态
+        let drawingActive = false;
+        let currentTool = 'line';
+        let lastPoint = null;
+        let leftHandGesture = 'none', rightHandGesture = 'none';
+        let leftHandGestureRaw = 'none', rightHandGestureRaw = 'none';
+        let leftHandOpen = false, leftHandFist = false, rightHandOpen = false, rightHandFist = false;
+        let leftOpenCount=0, leftFistCount=0, rightOpenCount=0, rightFistCount=0;
+        let leftGestureHistory = [], rightGestureHistory = [];
+        const MAX_GESTURE_HISTORY = 6;
+        let leftIndexTip = {x:0,y:0}, rightIndexTip = {x:0,y:0};
+        let fistHoldStart = null, clearTriggered = false;
+        const CLEAR_HOLD_TIME = 2000;
+        
+        function resizeCanvas() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+        function initCanvas() { resizeCanvas(); ctx.clearRect(0,0,canvas.width,canvas.height); ctx.globalCompositeOperation='source-over'; ctx.lineCap='round'; ctx.lineJoin='round'; }
+        function clearCanvasAction() { ctx.clearRect(0,0,canvas.width,canvas.height); lastPoint=null; modeStatusDiv.innerHTML='🧹 画板已清空'; setTimeout(()=>updateModeStatusDisplay(),1000); resetInactivityTimer(); }
+        function updateClearProgress(progress, label=null) {
+            const overlay = document.getElementById('clear-progress');
+            const ring = overlay?.querySelector('.progress-ring-circle');
+            if(!overlay) return;
+            overlay.style.display = progress>0 ? 'flex' : 'none';
+            if(ring) { const circumference=2*Math.PI*52; ring.style.strokeDashoffset = circumference*(1-Math.min(1,Math.max(0,progress))); }
+            if(label) overlay.querySelector('.progress-text').textContent = label;
+        }
+        function getAnimationTargetCenter() { const rect=rightTopAnimation.getBoundingClientRect(); return {x:rect.left+rect.width/2, y:rect.top+rect.height/2}; }
+        function startFeedAnimation() {
+            if(feedPhase) return;
+            resetInactivityTimer();
+            feedPhase='chi'; chiCurrentFrame=1; animationNextFrameTime=performance.now();
+            const snapshot=new Image(); snapshot.onload=()=>{ feedSnapshot=snapshot; feedTransitionStart=performance.now(); modeStatusDiv.innerHTML='🐟 正在投喂'; updateClearProgress(1,'正在投喂'); requestAnimationFrame(performFeedTransition); };
+            snapshot.src=canvas.toDataURL(); drawingActive=false; currentTool='none'; resetDrawingPath();
+        }
+        function performFeedTransition(timestamp) {
+            if(!feedSnapshot) return;
+            const progress=Math.min(1,(timestamp-feedTransitionStart)/FEED_ANIMATION_DURATION);
+            const target=getAnimationTargetCenter(); const startX=canvas.width/2, startY=canvas.height/2;
+            const translateX=(target.x-startX)*progress, translateY=(target.y-startY)*progress;
+            const scale=1-0.7*progress;
+            ctx.clearRect(0,0,canvas.width,canvas.height); ctx.save();
+            ctx.globalAlpha=1-progress; ctx.translate(startX+translateX,startY+translateY); ctx.scale(scale,scale); ctx.translate(-startX,-startY);
+            ctx.drawImage(feedSnapshot,0,0,canvas.width,canvas.height); ctx.restore();
+            if(progress<1) requestAnimationFrame(performFeedTransition);
+            else ctx.clearRect(0,0,canvas.width,canvas.height);
+        }
+        function updateModeStatusDisplay() {
+            if(feedPhase) { modeStatusDiv.innerHTML='🐟 正在投喂'; return; }
+            let toolText = currentTool==='line'?'✍️ 划线模式':currentTool==='smudge'?'🧽 橡皮擦模式':'⚙️ 待机';
+            const gestureMap={'one':'☝️','two':'✌️','thumb':'👍','none':'👐'};
+            modeStatusDiv.innerHTML = `${toolText} | ${drawingActive?'🟢 绘画中':'⚪ 抬笔'}`;
+            subStatusDiv.innerHTML = `✋ 左手: ${gestureMap[leftHandGesture]||'?'} &nbsp;| ✊ 右手: ${gestureMap[rightHandGesture]||'?'}`;
+        }
+        function updateToolByGesture(gesture) {
+            let old = currentTool;
+            if(gesture==='one') currentTool='line';
+            else if(gesture==='two') currentTool='smudge';
+            else currentTool='none';
+            if(old!==currentTool) resetInactivityTimer();
+            return currentTool;
+        }
+        function getStableGesture(history, fallback) {
+            let counts={}; history.forEach(g=>counts[g]=(counts[g]||0)+1);
+            let best='none', max=0;
+            for(let g in counts) if(g!=='none' && counts[g]>max) { max=counts[g]; best=g; }
+            return max>0 ? best : fallback;
+        }
+        // 手势检测函数
+        function isFingerExtended(landmarks, tip, pip, th=0.02) { return landmarks[tip].y < landmarks[pip].y - th; }
+        function isThumbExtended(landmarks) { return Math.abs(landmarks[4].x - landmarks[3].x) > 0.045; }
+        function isOneGesture(lm) { return isFingerExtended(lm,8,6,0.018) && !isFingerExtended(lm,12,10,0.018) && !isFingerExtended(lm,16,14,0.018) && !isFingerExtended(lm,20,18,0.018); }
+        function isTwoGesture(lm) { return isFingerExtended(lm,8,6,0.018) && isFingerExtended(lm,12,10,0.018) && Math.hypot(lm[8].x-lm[12].x, lm[8].y-lm[12].y) < 0.06; }
+        function isLeftHandOpen(lm) { return isFingerExtended(lm,8,6,0.014) && isFingerExtended(lm,12,10,0.014) && isFingerExtended(lm,16,14,0.014) && isFingerExtended(lm,20,18,0.014); }
+        function isLeftHandFist(lm) { return !isFingerExtended(lm,8,6,0.014) && !isFingerExtended(lm,12,10,0.014) && !isFingerExtended(lm,16,14,0.014) && !isFingerExtended(lm,20,18,0.014); }
+        function mapToCanvas(nx,ny) { return { x: (1-nx)*canvas.width, y: ny*canvas.height }; }
+        function drawLineSegment(from,to) { ctx.beginPath(); ctx.moveTo(from.x,from.y); ctx.lineTo(to.x,to.y); ctx.strokeStyle='#fff'; ctx.lineWidth=4; ctx.stroke(); }
+        function drawEraser(pos) { 
+            ctx.save(); ctx.globalCompositeOperation='destination-out'; 
+            ctx.beginPath(); ctx.arc(pos.x,pos.y,22,0,Math.PI*2); ctx.fill();
+            if(lastPoint) { ctx.beginPath(); ctx.moveTo(lastPoint.x,lastPoint.y); ctx.lineTo(pos.x,pos.y); ctx.strokeStyle='rgba(0,0,0,1)'; ctx.lineWidth=44; ctx.stroke(); }
+            ctx.restore();
+        }
+        function paintWithCurrentTool(pos) {
+            if(!drawingActive || !pos) return;
+            resetInactivityTimer(); // 每次绘画重置计时器
+            if(currentTool==='line') {
+                if(lastPoint) drawLineSegment(lastPoint,pos);
+                else { ctx.beginPath(); ctx.arc(pos.x,pos.y,3,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); }
+            } else if(currentTool==='smudge') {
+                drawEraser(pos);
+                if(lastPoint) {
+                    let dist=Math.hypot(pos.x-lastPoint.x, pos.y-lastPoint.y);
+                    if(dist>8) for(let i=1;i<=Math.min(10,Math.floor(dist/6));i++) { let t=i/(Math.min(10,Math.floor(dist/6))); drawEraser({x:lastPoint.x+(pos.x-lastPoint.x)*t, y:lastPoint.y+(pos.y-lastPoint.y)*t}); }
+                }
+            }
+            lastPoint={x:pos.x,y:pos.y};
+        }
+        function resetDrawingPath() { lastPoint=null; }
+        
+        // MediaPipe 结果处理 (完整版)
+        function onHandsResults(results) {
+            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+                if(drawingActive) { drawingActive=false; resetDrawingPath(); }
+                leftHandGesture='none'; rightHandGesture='none'; currentTool='none'; updateModeStatusDisplay(); return;
+            }
+            let leftHand=null, rightHand=null;
+            for(let i=0;i<results.multiHandLandmarks.length;i++) {
+                if(results.multiHandedness[i].label==='Left') leftHand=results.multiHandLandmarks[i];
+                else if(results.multiHandedness[i].label==='Right') rightHand=results.multiHandLandmarks[i];
+            }
+            if(!leftHand && results.multiHandLandmarks.length>=1) leftHand=results.multiHandLandmarks[0];
+            if(!rightHand && results.multiHandLandmarks.length>=2) rightHand=results.multiHandLandmarks[1];
+            
+            let leftOpen=false, leftFist=false, rightOpen=false, rightFist=false;
+            let leftGesture='none', rightGesture='none';
+            if(leftHand) {
+                leftOpen=isLeftHandOpen(leftHand); leftFist=isLeftHandFist(leftHand);
+                if(isOneGesture(leftHand)) leftGesture='one';
+                else if(isTwoGesture(leftHand)) leftGesture='two';
+                leftIndexTip=mapToCanvas(leftHand[8].x, leftHand[8].y);
+            }
+            if(rightHand) {
+                rightOpen=isLeftHandOpen(rightHand); rightFist=isLeftHandFist(rightHand);
+                if(isOneGesture(rightHand)) rightGesture='one';
+                else if(isTwoGesture(rightHand)) rightGesture='two';
+                rightIndexTip=mapToCanvas(rightHand[8].x, rightHand[8].y);
+            }
+            leftHandOpen=leftOpen; leftHandFist=leftFist; rightHandOpen=rightOpen; rightHandFist=rightFist;
+            leftHandGestureRaw=leftGesture; rightHandGestureRaw=rightGesture;
+            leftGestureHistory.push(leftGesture); if(leftGestureHistory.length>MAX_GESTURE_HISTORY) leftGestureHistory.shift();
+            rightGestureHistory.push(rightGesture); if(rightGestureHistory.length>MAX_GESTURE_HISTORY) rightGestureHistory.shift();
+            leftHandGesture = getStableGesture(leftGestureHistory, leftGesture);
+            rightHandGesture = getStableGesture(rightGestureHistory, rightGesture);
+            
+            let modeGesture = (leftHandGesture==='one'||rightHandGesture==='one')?'one':(leftHandGesture==='two'||rightHandGesture==='two')?'two':'none';
+            updateToolByGesture(modeGesture);
+            
+            // 控制手逻辑
+            let controlHand=null, drawingHand=null;
+            if(modeGesture==='one') {
+                if(leftHandGesture==='one' && rightHand) { controlHand='right'; drawingHand='left'; }
+                if(rightHandGesture==='one' && leftHand) { controlHand='left'; drawingHand='right'; }
+            } else if(modeGesture==='two') {
+                if(leftHandGesture==='two' && rightHand) { controlHand='right'; drawingHand='left'; }
+                if(rightHandGesture==='two' && leftHand) { controlHand='left'; drawingHand='right'; }
+            }
+            if(controlHand==='right') {
+                if(rightOpenCount>=2) { if(!drawingActive){drawingActive=true;resetDrawingPath();} }
+                else if(rightFistCount>=2) { if(drawingActive){drawingActive=false;resetDrawingPath();} }
+            } else if(controlHand==='left') {
+                if(leftOpenCount>=2) { if(!drawingActive){drawingActive=true;resetDrawingPath();} }
+                else if(leftFistCount>=2) { if(drawingActive){drawingActive=false;resetDrawingPath();} }
+            } else { if(drawingActive){drawingActive=false;resetDrawingPath();} }
+            
+            // 双手握拳清空动画
+            let bothHandsFist = leftHand && rightHand && isLeftHandFist(leftHand) && isLeftHandFist(rightHand);
+            if(bothHandsFist && !feedPhase) {
+                if(!fistHoldStart) { fistHoldStart=performance.now(); clearTriggered=false; }
+                let elapsed=performance.now()-fistHoldStart;
+                updateClearProgress(elapsed/CLEAR_HOLD_TIME);
+                if(elapsed>=CLEAR_HOLD_TIME && !clearTriggered) { clearTriggered=true; startFeedAnimation(); }
+            } else { fistHoldStart=null; if(!feedPhase) updateClearProgress(0); }
+            
+            // 绘画
+            if(drawingActive && drawingHand) {
+                let pos = drawingHand==='left' ? leftIndexTip : rightIndexTip;
+                if(pos && pos.x>0 && pos.x<canvas.width && pos.y>0 && pos.y<canvas.height) paintWithCurrentTool(pos);
+                else resetDrawingPath();
+            } else resetDrawingPath();
+            
+            // 更新计数稳定
+            leftOpenCount = leftHandOpen ? leftOpenCount+1 : 0;
+            leftFistCount = leftHandFist ? leftFistCount+1 : 0;
+            rightOpenCount = rightHandOpen ? rightOpenCount+1 : 0;
+            rightFistCount = rightHandFist ? rightFistCount+1 : 0;
+            
+            updateModeStatusDisplay();
+        }
+        let handsInstance = null;
+        let frameLoopActive = false;
+
+        async function initCameraAndHands() {
+            try {
+                modeStatusDiv.innerHTML = '🔌 正在请求摄像头...';
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } } });
+                video.srcObject = stream;
+                
+                await new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        video.play().then(resolve).catch(err => {
+                            console.warn('自动播放失败:', err);
+                            resolve();
+                        });
+                    };
+                });
+
+                reportIntervention('started', '摄像头与手势识别已启动');
+
+                handsInstance = new Hands({
+                    locateFile: (file) =>
+                        `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+                });
+
+                handsInstance.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.6,
+                    minTrackingConfidence: 0.5
+                });
+
+                handsInstance.onResults(onHandsResults);
+
+                frameLoopActive = true;
+
+                async function frameLoop() {
+                    if (!frameLoopActive) return;
+                    await handsInstance.send({ image: video });
+                    requestAnimationFrame(frameLoop);
+                }
+
+                frameLoop();
+
+                initCanvas();
+                resetInactivityTimer();
+                modeStatusDiv.innerHTML = '✅ 摄像头已连接';
+            } catch (e) {
+                console.error(e);
+                modeStatusDiv.innerHTML = '❌ 摄像头连接失败';
+                reportIntervention('failed', '摄像头或手势识别初始化失败');
+            }
+        }
+
+clearBtn.addEventListener('click', () => { startFeedAnimation(); resetInactivityTimer(); });
+window.addEventListener('resize', () => { resizeCanvas(); resetInactivityTimer(); });
+startInactivityMonitor();
+initCameraAndHands();
+</script>
+</body>
+</html>
